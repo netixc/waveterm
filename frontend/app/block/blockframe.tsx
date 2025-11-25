@@ -38,6 +38,18 @@ import { BlockFrameProps } from "./blocktypes";
 
 const NumActiveConnColors = 8;
 
+async function handleRenameBlock(blockData: Block) {
+    const currentName = blockData?.meta?.["display:name"] || "";
+    const newName = prompt("Enter new name for this widget:", currentName);
+    if (newName !== null) {
+        const oref = WOS.makeORef("block", blockData.oid);
+        await RpcApi.SetMetaCommand(TabRpcClient, {
+            oref: oref,
+            meta: { "display:name": newName || null },
+        });
+    }
+}
+
 function handleHeaderContextMenu(
     e: React.MouseEvent<HTMLDivElement>,
     blockData: Block,
@@ -52,6 +64,12 @@ function handleHeaderContextMenu(
             label: magnified ? "Un-Magnify Block" : "Magnify Block",
             click: () => {
                 onMagnifyToggle();
+            },
+        },
+        {
+            label: "Rename",
+            click: () => {
+                handleRenameBlock(blockData);
             },
         },
         // {
@@ -200,6 +218,9 @@ const BlockFrame_Header = ({
         recordTEvent("action:magnify", { "block:view": viewName });
     }, [magnified]);
 
+    if (blockData?.meta?.["display:name"]) {
+        viewName = blockData.meta["display:name"];
+    }
     if (blockData?.meta?.["frame:title"]) {
         viewName = blockData.meta["frame:title"];
     }
