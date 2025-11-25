@@ -1,109 +1,312 @@
 // Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Button } from "@/app/element/button";
-import { Markdown } from "@/app/element/markdown";
-import { TypingIndicator } from "@/app/element/typingindicator";
-import { RpcResponseHelper, WshClient } from "@/app/store/wshclient";
+import { AIMessage } from "@/app/aipanel/aimessage";
+import { AIToolUseModelProvider } from "@/app/aipanel/aitooluse";
+import { WaveUIMessage } from "@/app/aipanel/aitypes";
+import { AIDroppedFiles } from "@/app/aipanel/aidroppedfiles";
+import {
+    formatFileSizeError,
+    isAcceptableFile,
+    validateFileSize,
+    validateFileSizeFromInfo,
+} from "@/app/aipanel/ai-utils";
+import { atoms, getApi, globalStore, WOS } from "@/store/global";
+import { ObjectService } from "@/store/services";
+import { cn, fireAndForget, isBlank, base64ToArrayBuffer } from "@/util/util";
 import { RpcApi } from "@/app/store/wshclientapi";
-import { makeFeBlockRouteId } from "@/app/store/wshrouter";
-import { DefaultRouter, TabRpcClient } from "@/app/store/wshrpcutil";
-import { atoms, createBlock, fetchWaveFile, getApi, globalStore, WOS } from "@/store/global";
-import { BlockService, ObjectService } from "@/store/services";
-import { adaptFromReactOrNativeKeyEvent, checkKeyPressed } from "@/util/keyutil";
-import { fireAndForget, isBlank, makeIconClass, mergeMeta } from "@/util/util";
-import { atom, Atom, PrimitiveAtom, useAtomValue, WritableAtom } from "jotai";
-import { splitAtom } from "jotai/utils";
-import type { OverlayScrollbars } from "overlayscrollbars";
-import { OverlayScrollbarsComponent, OverlayScrollbarsComponentRef } from "overlayscrollbars-react";
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { debounce, throttle } from "throttle-debounce";
+import { TabRpcClient } from "@/app/store/wshrpcutil";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { atom, Atom, useAtomValue } from "jotai";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { useDrop } from "react-dnd";
+import { WaveAIBlockModel } from "./waveai-block-model";
 import "./waveai.scss";
 
-interface ChatMessageType {
-    id: string;
-    user: string;
-    text: string;
-    isUpdating?: boolean;
+// Block-specific messages component
+interface BlockMessagesProps {
+    messages: WaveUIMessage[];
+    status: string;
+    model: WaveAIBlockModel;
 }
 
-const outline = "2px solid var(--accent-color)";
-const slidingWindowSize = 30;
+const BlockMessages = memo(({ messages, status, model }: BlockMessagesProps) => {
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const messagesContainerRef = useRef<HTMLDivElement>(null);
+    const prevStatusRef = useRef<string>(status);
 
-interface ChatItemProps {
-    chatItemAtom: Atom<ChatMessageType>;
-    model: WaveAiModel;
-}
-
-function promptToMsg(prompt: WaveAIPromptMessageType): ChatMessageType {
-    return {
-        id: crypto.randomUUID(),
-        user: prompt.role,
-        text: prompt.content,
-    };
-}
-
-class AiWshClient extends WshClient {
-    blockId: string;
-    model: WaveAiModel;
-
-    constructor(blockId: string, model: WaveAiModel) {
-        super(makeFeBlockRouteId(blockId));
-        this.blockId = blockId;
-        this.model = model;
-    }
-
-    handle_aisendmessage(rh: RpcResponseHelper, data: AiMessageData) {
-        if (isBlank(data.message)) {
-            return;
+    const scrollToBottom = useCallback(() => {
+        const container = messagesContainerRef.current;
+        if (container) {
+            container.scrollTop = container.scrollHeight;
+            container.scrollLeft = 0;
         }
-        this.model.sendMessage(data.message);
-    }
+    }, []);
+
+    useEffect(() => {
+        model.registerScrollToBottom(scrollToBottom);
+    }, [model, scrollToBottom]);
+
+    useEffect(() => {
+        scrollToBottom();
+    }, [messages, scrollToBottom]);
+
+    useEffect(() => {
+        const wasStreaming = prevStatusRef.current === "streaming";
+        const isNowNotStreaming = status !== "streaming";
+
+        if (wasStreaming && isNowNotStreaming) {
+            requestAnimationFrame(() => {
+                scrollToBottom();
+            });
+        }
+
+        prevStatusRef.current = status;
+    }, [status, scrollToBottom]);
+
+    return (
+        <div ref={messagesContainerRef} className="waveai-messages flex-1 overflow-y-auto p-2 space-y-4">
+            {messages.map((message, index) => {
+                const isLastMessage = index === messages.length - 1;
+                const isStreaming = status === "streaming" && isLastMessage && message.role === "assistant";
+                return <AIMessage key={message.id} message={message} isStreaming={isStreaming} />;
+            })}
+
+            {status === "streaming" && (messages.length === 0 || messages[messages.length - 1].role !== "assistant") && (
+                <AIMessage
+                    key="last-message"
+                    message={{ role: "assistant", parts: [], id: "last-message" } as any}
+                    isStreaming={true}
+                />
+            )}
+
+            <div ref={messagesEndRef} />
+        </div>
+    );
+});
+
+BlockMessages.displayName = "BlockMessages";
+
+// Block-specific input component
+interface BlockInputProps {
+    onSubmit: (e: React.FormEvent) => void;
+    status: string;
+    model: WaveAIBlockModel;
 }
+
+const BlockInput = memo(({ onSubmit, status, model }: BlockInputProps) => {
+    const input = useAtomValue(model.inputAtom);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const resizeTextarea = useCallback(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+
+        textarea.style.height = "auto";
+        const scrollHeight = textarea.scrollHeight;
+        const maxHeight = 7 * 24;
+        textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+    }, []);
+
+    useEffect(() => {
+        const inputRefObject = {
+            current: {
+                focus: () => textareaRef.current?.focus(),
+                resize: resizeTextarea,
+                scrollToBottom: () => {
+                    const textarea = textareaRef.current;
+                    if (textarea) {
+                        textarea.scrollTop = textarea.scrollHeight;
+                    }
+                },
+            },
+        };
+        model.registerInputRef(inputRefObject as any);
+    }, [model, resizeTextarea]);
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        const isComposing = e.nativeEvent?.isComposing || e.keyCode == 229;
+        if (e.key === "Enter" && !e.shiftKey && !isComposing) {
+            e.preventDefault();
+            onSubmit(e as any);
+        }
+    };
+
+    useEffect(() => {
+        resizeTextarea();
+    }, [input, resizeTextarea]);
+
+    const handleUploadClick = () => {
+        fileInputRef.current?.click();
+    };
+
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(e.target.files || []);
+        const acceptableFiles = files.filter(isAcceptableFile);
+
+        for (const file of acceptableFiles) {
+            const sizeError = validateFileSize(file);
+            if (sizeError) {
+                model.setError(formatFileSizeError(sizeError));
+                if (e.target) {
+                    e.target.value = "";
+                }
+                return;
+            }
+            await model.addFile(file);
+        }
+
+        if (acceptableFiles.length < files.length) {
+            console.warn(`${files.length - acceptableFiles.length} files were rejected due to unsupported file types`);
+        }
+
+        if (e.target) {
+            e.target.value = "";
+        }
+    };
+
+    return (
+        <div className="waveai-input-container border-t border-gray-600">
+            <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.pdf,.txt,.md,.js,.jsx,.ts,.tsx,.go,.py,.java,.c,.cpp,.h,.hpp,.html,.css,.scss,.sass,.json,.xml,.yaml,.yml,.sh,.bat,.sql"
+                onChange={handleFileChange}
+                className="hidden"
+            />
+            <form onSubmit={onSubmit}>
+                <div className="relative">
+                    <textarea
+                        ref={textareaRef}
+                        value={input}
+                        onChange={(e) => globalStore.set(model.inputAtom, e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Ask Wave AI anything..."
+                        className="w-full text-white px-2 py-2 pr-5 focus:outline-none resize-none overflow-auto bg-gray-800"
+                        style={{ fontSize: "13px" }}
+                        rows={2}
+                    />
+                    <button
+                        type="button"
+                        onClick={handleUploadClick}
+                        className="absolute bottom-6 right-1 w-3.5 h-3.5 transition-colors flex items-center justify-center text-gray-400 hover:text-accent cursor-pointer"
+                    >
+                        <i className="fa fa-paperclip text-xs"></i>
+                    </button>
+                    <button
+                        type="submit"
+                        disabled={status !== "ready" || !input.trim()}
+                        className={cn(
+                            "absolute bottom-2 right-1 w-3.5 h-3.5 transition-colors flex items-center justify-center",
+                            status !== "ready" || !input.trim()
+                                ? "text-gray-400"
+                                : "text-accent/80 hover:text-accent cursor-pointer"
+                        )}
+                    >
+                        {status === "streaming" ? (
+                            <i className="fa fa-spinner fa-spin text-xs"></i>
+                        ) : (
+                            <i className="fa fa-paper-plane text-xs"></i>
+                        )}
+                    </button>
+                </div>
+            </form>
+        </div>
+    );
+});
+
+BlockInput.displayName = "BlockInput";
+
+// Error message component
+interface ErrorMessageProps {
+    errorMessage: string;
+    onClear: () => void;
+}
+
+const ErrorMessage = memo(({ errorMessage, onClear }: ErrorMessageProps) => {
+    return (
+        <div className="px-4 py-2 text-red-400 bg-red-900/20 border-l-4 border-red-500 mx-2 mb-2 relative">
+            <button
+                onClick={onClear}
+                className="absolute top-2 right-2 text-red-400 hover:text-red-300 cursor-pointer z-10"
+                aria-label="Close error"
+            >
+                <i className="fa fa-times text-sm"></i>
+            </button>
+            <div className="text-sm pr-6 max-h-[100px] overflow-y-auto">{errorMessage}</div>
+        </div>
+    );
+});
+
+ErrorMessage.displayName = "ErrorMessage";
+
+// Welcome message component
+const WelcomeMessage = memo(() => {
+    return (
+        <div className="text-secondary py-8 px-4">
+            <div className="text-center">
+                <i className="fa fa-sparkles text-4xl text-accent mb-4 block"></i>
+                <p className="text-lg font-bold text-primary">Wave AI</p>
+            </div>
+            <div className="mt-4 text-left max-w-md mx-auto">
+                <p className="text-sm mb-4">
+                    Wave AI is your terminal assistant with context. It can read your terminal output, analyze widgets,
+                    access files, and help you solve problems faster.
+                </p>
+                <p className="text-sm text-muted">
+                    Type a message below to get started.
+                </p>
+            </div>
+        </div>
+    );
+});
+
+WelcomeMessage.displayName = "WelcomeMessage";
+
+// Drag overlay component
+const DragOverlay = memo(() => {
+    return (
+        <div className="absolute inset-0 bg-accent/20 border-2 border-dashed border-accent rounded-lg flex items-center justify-center z-10 p-4">
+            <div className="text-accent text-center">
+                <i className="fa fa-upload text-3xl mb-2"></i>
+                <div className="text-lg font-semibold">Drop files here</div>
+                <div className="text-sm">Images, PDFs, and text/code files supported</div>
+            </div>
+        </div>
+    );
+});
+
+DragOverlay.displayName = "DragOverlay";
 
 export class WaveAiModel implements ViewModel {
     viewType: string;
     blockId: string;
     blockAtom: Atom<Block>;
-    presetKey: Atom<string>;
-    presetMap: Atom<{ [k: string]: MetaType }>;
-    mergedPresets: Atom<MetaType>;
-    aiOpts: Atom<WaveAIOptsType>;
     viewIcon?: Atom<string | IconButtonDecl>;
     viewName?: Atom<string>;
     viewText?: Atom<string | HeaderElem[]>;
-    preIconButton?: Atom<IconButtonDecl>;
     endIconButtons?: Atom<IconButtonDecl[]>;
-    messagesAtom: PrimitiveAtom<Array<ChatMessageType>>;
-    messagesSplitAtom: SplitAtom<Array<ChatMessageType>>;
-    latestMessageAtom: Atom<ChatMessageType>;
-    addMessageAtom: WritableAtom<unknown, [message: ChatMessageType], void>;
-    updateLastMessageAtom: WritableAtom<unknown, [text: string, isUpdating: boolean], void>;
-    removeLastMessageAtom: WritableAtom<unknown, [], void>;
-    simulateAssistantResponseAtom: WritableAtom<unknown, [userMessage: ChatMessageType], Promise<void>>;
-    textAreaRef: React.RefObject<HTMLTextAreaElement>;
-    locked: PrimitiveAtom<boolean>;
-    cancel: boolean;
-    aiWshClient: AiWshClient;
+    aiBlockModel: WaveAIBlockModel;
+    presetKey: Atom<string>;
+    presetMap: Atom<{ [k: string]: MetaType }>;
 
     constructor(blockId: string) {
-        this.aiWshClient = new AiWshClient(blockId, this);
-        DefaultRouter.registerRoute(makeFeBlockRouteId(blockId), this.aiWshClient);
-        this.locked = atom(false);
-        this.cancel = false;
         this.viewType = "waveai";
         this.blockId = blockId;
         this.blockAtom = WOS.getWaveObjectAtom<Block>(`block:${blockId}`);
         this.viewIcon = atom("sparkles");
         this.viewName = atom("Wave AI");
-        this.messagesAtom = atom([]);
-        this.messagesSplitAtom = splitAtom(this.messagesAtom);
-        this.latestMessageAtom = atom((get) => get(this.messagesAtom).slice(-1)[0]);
+        this.aiBlockModel = new WaveAIBlockModel(blockId);
+
         this.presetKey = atom((get) => {
             const metaPresetKey = get(this.blockAtom).meta["ai:preset"];
             const globalPresetKey = get(atoms.settingsAtom)["ai:preset"];
             return metaPresetKey ?? globalPresetKey;
         });
+
         this.presetMap = atom((get) => {
             const fullConfig = get(atoms.fullConfigAtom);
             const presets = fullConfig.presets;
@@ -123,129 +326,11 @@ export class WaveAiModel implements ViewModel {
             );
         });
 
-        this.addMessageAtom = atom(null, (get, set, message: ChatMessageType) => {
-            const messages = get(this.messagesAtom);
-            set(this.messagesAtom, [...messages, message]);
-        });
-
-        this.updateLastMessageAtom = atom(null, (get, set, text: string, isUpdating: boolean) => {
-            const messages = get(this.messagesAtom);
-            const lastMessage = messages[messages.length - 1];
-            if (lastMessage.user == "assistant") {
-                const updatedMessage = { ...lastMessage, text: lastMessage.text + text, isUpdating };
-                set(this.messagesAtom, [...messages.slice(0, -1), updatedMessage]);
-            }
-        });
-        this.removeLastMessageAtom = atom(null, (get, set) => {
-            const messages = get(this.messagesAtom);
-            messages.pop();
-            set(this.messagesAtom, [...messages]);
-        });
-        this.simulateAssistantResponseAtom = atom(null, async (_, set, userMessage: ChatMessageType) => {
-            // unused at the moment. can replace the temp() function in the future
-            const typingMessage: ChatMessageType = {
-                id: crypto.randomUUID(),
-                user: "assistant",
-                text: "",
-            };
-
-            // Add a typing indicator
-            set(this.addMessageAtom, typingMessage);
-            const parts = userMessage.text.split(" ");
-            let currentPart = 0;
-            while (currentPart < parts.length) {
-                const part = parts[currentPart] + " ";
-                set(this.updateLastMessageAtom, part, true);
-                currentPart++;
-            }
-            set(this.updateLastMessageAtom, "", false);
-        });
-
-        this.mergedPresets = atom((get) => {
-            const meta = get(this.blockAtom).meta;
-            let settings = get(atoms.settingsAtom);
-            let presetKey = get(this.presetKey);
-            let presets = get(atoms.fullConfigAtom).presets;
-            let selectedPresets = presets?.[presetKey] ?? {};
-
-            let mergedPresets: MetaType = {};
-            mergedPresets = mergeMeta(settings, selectedPresets, "ai");
-            mergedPresets = mergeMeta(mergedPresets, meta, "ai");
-
-            return mergedPresets;
-        });
-
-        this.aiOpts = atom((get) => {
-            const mergedPresets = get(this.mergedPresets);
-
-            const opts: WaveAIOptsType = {
-                model: mergedPresets["ai:model"] ?? null,
-                apitype: mergedPresets["ai:apitype"] ?? null,
-                orgid: mergedPresets["ai:orgid"] ?? null,
-                apitoken: mergedPresets["ai:apitoken"] ?? null,
-                apiversion: mergedPresets["ai:apiversion"] ?? null,
-                maxtokens: mergedPresets["ai:maxtokens"] ?? null,
-                timeoutms: mergedPresets["ai:timeoutms"] ?? 60000,
-                baseurl: mergedPresets["ai:baseurl"] ?? null,
-                proxyurl: mergedPresets["ai:proxyurl"] ?? null,
-            };
-            return opts;
-        });
-
         this.viewText = atom((get) => {
             const viewTextChildren: HeaderElem[] = [];
-            const aiOpts = get(this.aiOpts);
             const presets = get(this.presetMap);
             const presetKey = get(this.presetKey);
             const presetName = presets[presetKey]?.["display:name"] ?? "";
-            const isCloud = isBlank(aiOpts.apitoken) && isBlank(aiOpts.baseurl);
-
-            // Handle known API providers
-            switch (aiOpts?.apitype) {
-                case "anthropic":
-                    viewTextChildren.push({
-                        elemtype: "iconbutton",
-                        icon: "globe",
-                        title: `Using Remote Anthropic API (${aiOpts.model})`,
-                        noAction: true,
-                    });
-                    break;
-                case "perplexity":
-                    viewTextChildren.push({
-                        elemtype: "iconbutton",
-                        icon: "globe",
-                        title: `Using Remote Perplexity API (${aiOpts.model})`,
-                        noAction: true,
-                    });
-                    break;
-                default:
-                    if (isCloud) {
-                        viewTextChildren.push({
-                            elemtype: "iconbutton",
-                            icon: "cloud",
-                            title: "Using Wave's AI Proxy (gpt-5-mini)",
-                            noAction: true,
-                        });
-                    } else {
-                        const baseUrl = aiOpts.baseurl ?? "OpenAI Default Endpoint";
-                        const modelName = aiOpts.model;
-                        if (baseUrl.startsWith("http://localhost") || baseUrl.startsWith("http://127.0.0.1")) {
-                            viewTextChildren.push({
-                                elemtype: "iconbutton",
-                                icon: "location-dot",
-                                title: `Using Local Model @ ${baseUrl} (${modelName})`,
-                                noAction: true,
-                            });
-                        } else {
-                            viewTextChildren.push({
-                                elemtype: "iconbutton",
-                                icon: "globe",
-                                title: `Using Remote Model @ ${baseUrl} (${modelName})`,
-                                noAction: true,
-                            });
-                        }
-                    }
-            }
 
             const dropdownItems = Object.entries(presets)
                 .sort((a, b) => ((a[1]["display:order"] ?? 0) > (b[1]["display:order"] ?? 0) ? 1 : -1))
@@ -272,6 +357,7 @@ export class WaveAiModel implements ViewModel {
                                 file: path,
                             },
                         };
+                        const { createBlock } = await import("@/store/global");
                         await createBlock(blockDef, false, true);
                     });
                 },
@@ -284,12 +370,13 @@ export class WaveAiModel implements ViewModel {
             });
             return viewTextChildren;
         });
+
         this.endIconButtons = atom((_) => {
             let clearButton: IconButtonDecl = {
                 elemtype: "iconbutton",
                 icon: "delete-left",
                 title: "Clear Chat History",
-                click: this.clearMessages.bind(this),
+                click: () => this.aiBlockModel.clearChat(),
             };
             return [clearButton];
         });
@@ -300,582 +387,216 @@ export class WaveAiModel implements ViewModel {
     }
 
     dispose() {
-        DefaultRouter.unregisterRoute(makeFeBlockRouteId(this.blockId));
-    }
-
-    async populateMessages(): Promise<void> {
-        const history = await this.fetchAiData();
-        globalStore.set(this.messagesAtom, history.map(promptToMsg));
-    }
-
-    async fetchAiData(): Promise<Array<WaveAIPromptMessageType>> {
-        const { data } = await fetchWaveFile(this.blockId, "aidata");
-        if (!data) {
-            return [];
-        }
-        const history: Array<WaveAIPromptMessageType> = JSON.parse(new TextDecoder().decode(data));
-        return history.slice(Math.max(history.length - slidingWindowSize, 0));
+        // Cleanup if needed
     }
 
     giveFocus(): boolean {
-        if (this?.textAreaRef?.current) {
-            this.textAreaRef.current?.focus();
-            return true;
-        }
-        return false;
-    }
-
-    getAiName(): string {
-        const blockMeta = globalStore.get(this.blockAtom)?.meta ?? {};
-        const settings = globalStore.get(atoms.settingsAtom) ?? {};
-        const name = blockMeta["ai:name"] ?? settings["ai:name"] ?? null;
-        return name;
-    }
-
-    setLocked(locked: boolean) {
-        globalStore.set(this.locked, locked);
-    }
-
-    sendMessage(text: string, user: string = "user") {
-        const clientId = globalStore.get(atoms.clientId);
-        this.setLocked(true);
-
-        const newMessage: ChatMessageType = {
-            id: crypto.randomUUID(),
-            user,
-            text,
-        };
-        globalStore.set(this.addMessageAtom, newMessage);
-        // send message to backend and get response
-        const opts = globalStore.get(this.aiOpts);
-        const newPrompt: WaveAIPromptMessageType = {
-            role: "user",
-            content: text,
-        };
-        const handleAiStreamingResponse = async () => {
-            const typingMessage: ChatMessageType = {
-                id: crypto.randomUUID(),
-                user: "assistant",
-                text: "",
-            };
-
-            // Add a typing indicator
-            globalStore.set(this.addMessageAtom, typingMessage);
-            const history = await this.fetchAiData();
-            const beMsg: WaveAIStreamRequest = {
-                clientid: clientId,
-                opts: opts,
-                prompt: [...history, newPrompt],
-            };
-            let fullMsg = "";
-            try {
-                const aiGen = RpcApi.StreamWaveAiCommand(TabRpcClient, beMsg, { timeout: opts.timeoutms });
-                for await (const msg of aiGen) {
-                    fullMsg += msg.text ?? "";
-                    globalStore.set(this.updateLastMessageAtom, msg.text ?? "", true);
-                    if (this.cancel) {
-                        break;
-                    }
-                }
-                if (fullMsg == "") {
-                    // remove a message if empty
-                    globalStore.set(this.removeLastMessageAtom);
-                    // only save the author's prompt
-                    await BlockService.SaveWaveAiData(this.blockId, [...history, newPrompt]);
-                } else {
-                    const responsePrompt: WaveAIPromptMessageType = {
-                        role: "assistant",
-                        content: fullMsg,
-                    };
-                    //mark message as complete
-                    globalStore.set(this.updateLastMessageAtom, "", false);
-                    // save a complete message prompt and response
-                    await BlockService.SaveWaveAiData(this.blockId, [...history, newPrompt, responsePrompt]);
-                }
-            } catch (error) {
-                const updatedHist = [...history, newPrompt];
-                if (fullMsg == "") {
-                    globalStore.set(this.removeLastMessageAtom);
-                } else {
-                    globalStore.set(this.updateLastMessageAtom, "", false);
-                    const responsePrompt: WaveAIPromptMessageType = {
-                        role: "assistant",
-                        content: fullMsg,
-                    };
-                    updatedHist.push(responsePrompt);
-                }
-                const errMsg: string = (error as Error).message;
-                const errorMessage: ChatMessageType = {
-                    id: crypto.randomUUID(),
-                    user: "error",
-                    text: errMsg,
-                };
-                globalStore.set(this.addMessageAtom, errorMessage);
-                globalStore.set(this.updateLastMessageAtom, "", false);
-                const errorPrompt: WaveAIPromptMessageType = {
-                    role: "error",
-                    content: errMsg,
-                };
-                updatedHist.push(errorPrompt);
-                await BlockService.SaveWaveAiData(this.blockId, updatedHist);
-            }
-            this.setLocked(false);
-            this.cancel = false;
-        };
-        fireAndForget(handleAiStreamingResponse);
-    }
-
-    useWaveAi() {
-        return {
-            sendMessage: this.sendMessage.bind(this) as (text: string) => void,
-        };
-    }
-
-    async clearMessages() {
-        await BlockService.SaveWaveAiData(this.blockId, []);
-        globalStore.set(this.messagesAtom, []);
-    }
-
-    keyDownHandler(waveEvent: WaveKeyboardEvent): boolean {
-        if (checkKeyPressed(waveEvent, "Cmd:l")) {
-            fireAndForget(this.clearMessages.bind(this));
-            return true;
-        }
-        return false;
+        this.aiBlockModel.focusInput();
+        return true;
     }
 }
-
-const ChatItem = ({ chatItemAtom, model }: ChatItemProps) => {
-    const chatItem = useAtomValue(chatItemAtom);
-    const { user, text } = chatItem;
-    const fontSize = useAtomValue(model.mergedPresets)?.["ai:fontsize"];
-    const fixedFontSize = useAtomValue(model.mergedPresets)?.["ai:fixedfontsize"];
-    const renderContent = useMemo(() => {
-        if (user == "error") {
-            return (
-                <>
-                    <div className="chat-msg chat-msg-header">
-                        <div className="icon-box">
-                            <i className="fa-sharp fa-solid fa-circle-exclamation"></i>
-                        </div>
-                    </div>
-                    <div className="chat-msg chat-msg-error">
-                        <Markdown
-                            text={text}
-                            scrollable={false}
-                            fontSizeOverride={fontSize}
-                            fixedFontSizeOverride={fixedFontSize}
-                        />
-                    </div>
-                </>
-            );
-        }
-        if (user == "assistant") {
-            return text ? (
-                <>
-                    <div className="chat-msg chat-msg-header">
-                        <div className="icon-box">
-                            <i className="fa-sharp fa-solid fa-sparkles"></i>
-                        </div>
-                    </div>
-                    <div className="chat-msg chat-msg-assistant">
-                        <Markdown
-                            text={text}
-                            scrollable={false}
-                            fontSizeOverride={fontSize}
-                            fixedFontSizeOverride={fixedFontSize}
-                        />
-                    </div>
-                </>
-            ) : (
-                <>
-                    <div className="chat-msg-header">
-                        <i className="fa-sharp fa-solid fa-sparkles"></i>
-                    </div>
-                    <TypingIndicator className="chat-msg typing-indicator" />
-                </>
-            );
-        }
-        return (
-            <>
-                <div className="chat-msg chat-msg-user">
-                    <Markdown
-                        className="msg-text"
-                        text={text}
-                        scrollable={false}
-                        fontSizeOverride={fontSize}
-                        fixedFontSizeOverride={fixedFontSize}
-                    />
-                </div>
-            </>
-        );
-    }, [text, user, fontSize, fixedFontSize]);
-
-    return <div className={"chat-msg-container"}>{renderContent}</div>;
-};
-
-interface ChatWindowProps {
-    chatWindowRef: React.RefObject<HTMLDivElement>;
-    msgWidths: Object;
-    model: WaveAiModel;
-}
-
-const ChatWindow = memo(
-    forwardRef<OverlayScrollbarsComponentRef, ChatWindowProps>(({ chatWindowRef, msgWidths, model }, ref) => {
-        const isUserScrolling = useRef(false);
-        const osRef = useRef<OverlayScrollbarsComponentRef>(null);
-        const splitMessages = useAtomValue(model.messagesSplitAtom) as Atom<ChatMessageType>[];
-        const latestMessage = useAtomValue(model.latestMessageAtom);
-        const prevMessagesLenRef = useRef(splitMessages.length);
-
-        useImperativeHandle(ref, () => osRef.current as OverlayScrollbarsComponentRef);
-
-        const handleNewMessage = useCallback(
-            throttle(100, (messagesLen: number) => {
-                if (osRef.current?.osInstance()) {
-                    const { viewport } = osRef.current.osInstance().elements();
-                    if (prevMessagesLenRef.current !== messagesLen || !isUserScrolling.current) {
-                        viewport.scrollTo({
-                            behavior: "auto",
-                            top: chatWindowRef.current?.scrollHeight || 0,
-                        });
-                    }
-
-                    prevMessagesLenRef.current = messagesLen;
-                }
-            }),
-            []
-        );
-
-        useEffect(() => {
-            handleNewMessage(splitMessages.length);
-        }, [splitMessages, latestMessage]);
-
-        // Wait 300 ms after the user stops scrolling to determine if the user is within 300px of the bottom of the chat window.
-        // If so, unset the user scrolling flag.
-        const determineUnsetScroll = useCallback(
-            debounce(300, () => {
-                const { viewport } = osRef.current.osInstance().elements();
-                if (viewport.scrollTop > chatWindowRef.current?.clientHeight - viewport.clientHeight - 100) {
-                    isUserScrolling.current = false;
-                }
-            }),
-            []
-        );
-
-        const handleUserScroll = useCallback(
-            throttle(100, () => {
-                isUserScrolling.current = true;
-                determineUnsetScroll();
-            }),
-            []
-        );
-
-        useEffect(() => {
-            if (osRef.current?.osInstance()) {
-                const { viewport } = osRef.current.osInstance().elements();
-
-                viewport.addEventListener("wheel", handleUserScroll, { passive: true });
-                viewport.addEventListener("touchmove", handleUserScroll, { passive: true });
-
-                return () => {
-                    viewport.removeEventListener("wheel", handleUserScroll);
-                    viewport.removeEventListener("touchmove", handleUserScroll);
-                    if (osRef.current && osRef.current.osInstance()) {
-                        osRef.current.osInstance().destroy();
-                    }
-                };
-            }
-        }, []);
-
-        const handleScrollbarInitialized = (instance: OverlayScrollbars) => {
-            const { viewport } = instance.elements();
-            viewport.removeAttribute("tabindex");
-            viewport.scrollTo({
-                behavior: "auto",
-                top: chatWindowRef.current?.scrollHeight || 0,
-            });
-        };
-
-        const handleScrollbarUpdated = (instance: OverlayScrollbars) => {
-            const { viewport } = instance.elements();
-            viewport.removeAttribute("tabindex");
-        };
-
-        return (
-            <OverlayScrollbarsComponent
-                ref={osRef}
-                className="chat-window-container"
-                options={{ scrollbars: { autoHide: "leave" } }}
-                events={{ initialized: handleScrollbarInitialized, updated: handleScrollbarUpdated }}
-            >
-                <div ref={chatWindowRef} className="chat-window" style={msgWidths}>
-                    <div className="filler"></div>
-                    {splitMessages.map((chitem, idx) => (
-                        <ChatItem key={idx} chatItemAtom={chitem} model={model} />
-                    ))}
-                </div>
-            </OverlayScrollbarsComponent>
-        );
-    })
-);
-
-interface ChatInputProps {
-    value: string;
-    baseFontSize: number;
-    onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
-    onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-    onMouseDown: (e: React.MouseEvent<HTMLTextAreaElement>) => void;
-    model: WaveAiModel;
-}
-
-const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(
-    ({ value, onChange, onKeyDown, onMouseDown, baseFontSize, model }, ref) => {
-        const textAreaRef = useRef<HTMLTextAreaElement>(null);
-
-        useImperativeHandle(ref, () => textAreaRef.current as HTMLTextAreaElement);
-
-        useEffect(() => {
-            model.textAreaRef = textAreaRef;
-        }, []);
-
-        const adjustTextAreaHeight = useCallback(
-            (value: string) => {
-                if (textAreaRef.current == null) {
-                    return;
-                }
-
-                // Adjust the height of the textarea to fit the text
-                const textAreaMaxLines = 5;
-                const textAreaLineHeight = baseFontSize * 1.5;
-                const textAreaMinHeight = textAreaLineHeight;
-                const textAreaMaxHeight = textAreaLineHeight * textAreaMaxLines;
-
-                if (value === "") {
-                    textAreaRef.current.style.height = `${textAreaLineHeight}px`;
-                    return;
-                }
-
-                textAreaRef.current.style.height = `${textAreaLineHeight}px`;
-                const scrollHeight = textAreaRef.current.scrollHeight;
-                const newHeight = Math.min(Math.max(scrollHeight, textAreaMinHeight), textAreaMaxHeight);
-                textAreaRef.current.style.height = newHeight + "px";
-            },
-            [baseFontSize]
-        );
-
-        useEffect(() => {
-            adjustTextAreaHeight(value);
-        }, [value]);
-
-        return (
-            <textarea
-                ref={textAreaRef}
-                autoComplete="off"
-                autoCorrect="off"
-                className="waveai-input"
-                onMouseDown={onMouseDown} // When the user clicks on the textarea
-                onChange={onChange}
-                onKeyDown={onKeyDown}
-                style={{ fontSize: baseFontSize }}
-                placeholder="Ask anything..."
-                value={value}
-            ></textarea>
-        );
-    }
-);
 
 const WaveAi = ({ model }: { model: WaveAiModel; blockId: string }) => {
-    const { sendMessage } = model.useWaveAi();
-    const waveaiRef = useRef<HTMLDivElement>(null);
-    const chatWindowRef = useRef<HTMLDivElement>(null);
-    const osRef = useRef<OverlayScrollbarsComponentRef>(null);
-    const inputRef = useRef<HTMLTextAreaElement>(null);
+    const [isDragOver, setIsDragOver] = useState(false);
+    const [isReactDndDragOver, setIsReactDndDragOver] = useState(false);
+    const [initialLoadDone, setInitialLoadDone] = useState(false);
+    const aiModel = model.aiBlockModel;
+    const containerRef = useRef<HTMLDivElement>(null);
+    const errorMessage = useAtomValue(aiModel.errorMessage);
 
-    const [value, setValue] = useState("");
-    const [selectedBlockIdx, setSelectedBlockIdx] = useState<number | null>(null);
+    const { messages, sendMessage, status, setMessages, error, stop } = useChat({
+        transport: new DefaultChatTransport({
+            api: aiModel.getUseChatEndpointUrl(),
+            prepareSendMessagesRequest: (opts) => {
+                const msg = aiModel.getAndClearMessage();
+                const body: any = {
+                    msg,
+                    chatid: globalStore.get(aiModel.chatId),
+                    widgetaccess: globalStore.get(aiModel.widgetAccessAtom),
+                    tabid: globalStore.get(atoms.staticTabId),
+                };
+                return { body };
+            },
+        }),
+        onError: (error) => {
+            console.error("AI Chat error:", error);
+            aiModel.setError(error.message || "An error occurred");
+        },
+    });
 
-    const baseFontSize: number = 14;
-    const msgWidths = {};
-    const locked = useAtomValue(model.locked);
-
-    // a weird workaround to initialize ansynchronously
-    useEffect(() => {
-        fireAndForget(model.populateMessages.bind(model));
-    }, []);
-
-    const handleTextAreaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        setValue(e.target.value);
-    };
-
-    const updatePreTagOutline = (clickedPre?: HTMLElement | null) => {
-        const pres = chatWindowRef.current?.querySelectorAll("pre");
-        if (!pres) return;
-
-        pres.forEach((preElement, idx) => {
-            if (preElement === clickedPre) {
-                setSelectedBlockIdx(idx);
-            } else {
-                preElement.style.outline = "none";
-            }
-        });
-
-        if (clickedPre) {
-            clickedPre.style.outline = outline;
-        }
-    };
+    aiModel.registerUseChatData(sendMessage, setMessages, status, stop);
 
     useEffect(() => {
-        if (selectedBlockIdx !== null) {
-            const pres = chatWindowRef.current?.querySelectorAll("pre");
-            if (pres && pres[selectedBlockIdx]) {
-                pres[selectedBlockIdx].style.outline = outline;
+        globalStore.set(aiModel.isAIStreaming, status == "streaming");
+    }, [status, aiModel]);
+
+    useEffect(() => {
+        const loadChat = async () => {
+            await aiModel.uiLoadInitialChat();
+            setInitialLoadDone(true);
+        };
+        loadChat();
+    }, [aiModel]);
+
+    useEffect(() => {
+        const updateWidth = () => {
+            if (containerRef.current) {
+                globalStore.set(aiModel.containerWidth, containerRef.current.offsetWidth);
             }
-        }
-    }, [selectedBlockIdx]);
+        };
 
-    const handleTextAreaMouseDown = () => {
-        updatePreTagOutline();
-        setSelectedBlockIdx(null);
+        updateWidth();
+
+        const resizeObserver = new ResizeObserver(updateWidth);
+        if (containerRef.current) {
+            resizeObserver.observe(containerRef.current);
+        }
+
+        return () => {
+            resizeObserver.disconnect();
+        };
+    }, [aiModel]);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        await aiModel.handleSubmit();
+        setTimeout(() => {
+            aiModel.focusInput();
+        }, 100);
     };
 
-    const handleEnterKeyPressed = useCallback(() => {
-        // using globalStore to avoid potential timing problems
-        // useAtom means the component must rerender once before
-        // the unlock is detected. this automatically checks on the
-        // callback firing instead
-        const locked = globalStore.get(model.locked);
-        if (locked || value === "") return;
+    const hasFilesDragged = (dataTransfer: DataTransfer): boolean => {
+        return dataTransfer.types.includes("Files");
+    };
 
-        sendMessage(value);
-        setValue("");
-        setSelectedBlockIdx(null);
-    }, [value]);
+    const handleDragOver = (e: React.DragEvent) => {
+        const hasFiles = hasFilesDragged(e.dataTransfer);
+        if (!hasFiles) return;
 
-    const updateScrollTop = () => {
-        const pres = chatWindowRef.current?.querySelectorAll("pre");
-        if (!pres || selectedBlockIdx === null) return;
+        e.preventDefault();
+        e.stopPropagation();
 
-        const block = pres[selectedBlockIdx];
-        if (!block || !osRef.current?.osInstance()) return;
+        if (!isDragOver) {
+            setIsDragOver(true);
+        }
+    };
 
-        const { viewport, scrollOffsetElement } = osRef.current?.osInstance().elements();
-        const chatWindowTop = scrollOffsetElement.scrollTop;
-        const chatWindowHeight = chatWindowRef.current.clientHeight;
-        const chatWindowBottom = chatWindowTop + chatWindowHeight;
-        const elemTop = block.offsetTop;
-        const elemBottom = elemTop + block.offsetHeight;
-        const elementIsInView = elemBottom <= chatWindowBottom && elemTop >= chatWindowTop;
+    const handleDragEnter = (e: React.DragEvent) => {
+        const hasFiles = hasFilesDragged(e.dataTransfer);
+        if (!hasFiles) return;
 
-        if (!elementIsInView) {
-            let scrollPosition;
-            if (elemBottom > chatWindowBottom) {
-                scrollPosition = elemTop - chatWindowHeight + block.offsetHeight + 15;
-            } else if (elemTop < chatWindowTop) {
-                scrollPosition = elemTop - 15;
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(true);
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        const hasFiles = hasFilesDragged(e.dataTransfer);
+        if (!hasFiles) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const x = e.clientX;
+        const y = e.clientY;
+
+        if (x <= rect.left || x >= rect.right || y <= rect.top || y >= rect.bottom) {
+            setIsDragOver(false);
+        }
+    };
+
+    const handleDrop = async (e: React.DragEvent) => {
+        if (!e.dataTransfer.files.length) {
+            return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(false);
+
+        const files = Array.from(e.dataTransfer.files);
+        const acceptableFiles = files.filter(isAcceptableFile);
+
+        for (const file of acceptableFiles) {
+            const sizeError = validateFileSize(file);
+            if (sizeError) {
+                aiModel.setError(formatFileSizeError(sizeError));
+                return;
             }
-            viewport.scrollTo({
-                behavior: "auto",
-                top: scrollPosition,
-            });
+            await aiModel.addFile(file);
+        }
+
+        if (acceptableFiles.length < files.length) {
+            const rejectedCount = files.length - acceptableFiles.length;
+            const rejectedFiles = files.filter((f) => !isAcceptableFile(f));
+            const fileNames = rejectedFiles.map((f) => f.name).join(", ");
+            aiModel.setError(
+                `${rejectedCount} file${rejectedCount > 1 ? "s" : ""} rejected (unsupported type): ${fileNames}. Supported: images, PDFs, and text/code files.`
+            );
         }
     };
 
-    const shouldSelectCodeBlock = (key: "ArrowUp" | "ArrowDown") => {
-        const textarea = inputRef.current;
-        const cursorPosition = textarea?.selectionStart || 0;
-        const textBeforeCursor = textarea?.value.slice(0, cursorPosition) || "";
+    const handleFileItemDrop = useCallback(
+        (draggedFile: DraggedFile) => aiModel.addFileFromRemoteUri(draggedFile),
+        [aiModel]
+    );
 
-        return (
-            (textBeforeCursor.indexOf("\n") === -1 && cursorPosition === 0 && key === "ArrowUp") ||
-            selectedBlockIdx !== null
-        );
-    };
+    const [{ isOver, canDrop }, drop] = useDrop(
+        () => ({
+            accept: "FILE_ITEM",
+            drop: handleFileItemDrop,
+            collect: (monitor) => ({
+                isOver: monitor.isOver(),
+                canDrop: monitor.canDrop(),
+            }),
+        }),
+        [handleFileItemDrop]
+    );
 
-    const handleArrowUpPressed = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        if (shouldSelectCodeBlock("ArrowUp")) {
-            e.preventDefault();
-            const pres = chatWindowRef.current?.querySelectorAll("pre");
-            let blockIndex = selectedBlockIdx;
-            if (!pres) return;
-            if (blockIndex === null) {
-                setSelectedBlockIdx(pres.length - 1);
-            } else if (blockIndex > 0) {
-                blockIndex--;
-                setSelectedBlockIdx(blockIndex);
-            }
-            updateScrollTop();
-        }
-    };
-
-    const handleArrowDownPressed = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        if (shouldSelectCodeBlock("ArrowDown")) {
-            e.preventDefault();
-            const pres = chatWindowRef.current?.querySelectorAll("pre");
-            let blockIndex = selectedBlockIdx;
-            if (!pres) return;
-            if (blockIndex === null) return;
-            if (blockIndex < pres.length - 1 && blockIndex >= 0) {
-                setSelectedBlockIdx(++blockIndex);
-                updateScrollTop();
-            } else {
-                inputRef.current.focus();
-                setSelectedBlockIdx(null);
-            }
-            updateScrollTop();
-        }
-    };
-
-    const handleTextAreaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        const waveEvent = adaptFromReactOrNativeKeyEvent(e);
-        if (checkKeyPressed(waveEvent, "Enter")) {
-            e.preventDefault();
-            handleEnterKeyPressed();
-        } else if (checkKeyPressed(waveEvent, "ArrowUp")) {
-            handleArrowUpPressed(e);
-        } else if (checkKeyPressed(waveEvent, "ArrowDown")) {
-            handleArrowDownPressed(e);
-        }
-    };
-
-    let buttonClass = "waveai-submit-button";
-    let buttonIcon = makeIconClass("arrow-up", false);
-    let buttonTitle = "run";
-    if (locked) {
-        buttonClass = "waveai-submit-button stop";
-        buttonIcon = makeIconClass("stop", false);
-        buttonTitle = "stop";
-    }
-    const handleButtonPress = useCallback(() => {
-        if (locked) {
-            model.cancel = true;
+    useEffect(() => {
+        if (isOver && canDrop) {
+            setIsReactDndDragOver(true);
         } else {
-            handleEnterKeyPressed();
+            setIsReactDndDragOver(false);
         }
-    }, [locked, handleEnterKeyPressed]);
+    }, [isOver, canDrop]);
+
+    useEffect(() => {
+        if (containerRef.current) {
+            drop(containerRef.current);
+        }
+    }, [drop]);
 
     return (
-        <div ref={waveaiRef} className="waveai">
-            <div className="waveai-chat">
-                <ChatWindow ref={osRef} chatWindowRef={chatWindowRef} msgWidths={msgWidths} model={model} />
-            </div>
-            <div className="waveai-controls">
-                <div className="waveai-input-wrapper">
-                    <ChatInput
-                        ref={inputRef}
-                        value={value}
-                        model={model}
-                        onChange={handleTextAreaChange}
-                        onKeyDown={handleTextAreaKeyDown}
-                        onMouseDown={handleTextAreaMouseDown}
-                        baseFontSize={baseFontSize}
-                    />
+        <AIToolUseModelProvider value={aiModel}>
+            <div
+                ref={containerRef}
+                className={cn(
+                    "waveai @container bg-gray-900 flex flex-col h-full relative",
+                    (isDragOver || isReactDndDragOver) && "bg-gray-800 border-accent"
+                )}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+            >
+                {(isDragOver || isReactDndDragOver) && <DragOverlay />}
+
+                <div className="flex-1 flex flex-col min-h-0">
+                    {messages.length === 0 && initialLoadDone ? (
+                        <div className="flex-1 overflow-y-auto p-2">
+                            <WelcomeMessage />
+                        </div>
+                    ) : (
+                        <BlockMessages messages={messages as WaveUIMessage[]} status={status} model={aiModel} />
+                    )}
+                    {errorMessage && <ErrorMessage errorMessage={errorMessage} onClear={() => aiModel.clearError()} />}
+                    <AIDroppedFiles model={aiModel as any} />
+                    <BlockInput onSubmit={handleSubmit} status={status} model={aiModel} />
                 </div>
-                <Button className={buttonClass} onClick={handleButtonPress}>
-                    <i className={buttonIcon} title={buttonTitle} />
-                </Button>
             </div>
-        </div>
+        </AIToolUseModelProvider>
     );
 };
 

@@ -5,10 +5,39 @@ import { BlockModel } from "@/app/block/block-model";
 import { Modal } from "@/app/modals/modal";
 import { recordTEvent } from "@/app/store/global";
 import { cn, fireAndForget } from "@/util/util";
+import * as jotai from "jotai";
 import { useAtomValue } from "jotai";
-import { memo, useEffect, useRef, useState } from "react";
+import { createContext, memo, useContext, useEffect, useRef, useState } from "react";
 import { WaveUIMessagePart } from "./aitypes";
 import { WaveAIModel } from "./waveai-model";
+
+// Interface for AI model that tool use components need
+export interface AIToolUseModelInterface {
+    restoreBackupModalToolCallId: jotai.PrimitiveAtom<string | null>;
+    restoreBackupStatus: jotai.PrimitiveAtom<"idle" | "processing" | "success" | "error">;
+    restoreBackupError: jotai.PrimitiveAtom<string>;
+    toolUseKeepalive(toolcallid: string): void;
+    toolUseSendApproval(toolcallid: string, approval: string): void;
+    openDiff(fileName: string, toolcallid: string): Promise<void>;
+    openRestoreBackupModal(toolcallid: string): void;
+    closeRestoreBackupModal(): void;
+    restoreBackup(toolcallid: string, backupFilePath: string, restoreToFileName: string): Promise<void>;
+}
+
+// Context for passing model to tool use components
+const AIToolUseModelContext = createContext<AIToolUseModelInterface | null>(null);
+
+export const AIToolUseModelProvider = AIToolUseModelContext.Provider;
+
+// Hook to get the model from context, falling back to singleton
+function useAIToolUseModel(): AIToolUseModelInterface {
+    const contextModel = useContext(AIToolUseModelContext);
+    if (contextModel) {
+        return contextModel;
+    }
+    // Fallback to singleton for backwards compatibility with AI Panel
+    return WaveAIModel.getInstance();
+}
 
 // matches pkg/filebackup/filebackup.go
 const BackupRetentionDays = 5;
@@ -147,6 +176,7 @@ const AIToolUseBatch = memo(({ parts, isStreaming }: AIToolUseBatchProps) => {
     const [userApprovalOverride, setUserApprovalOverride] = useState<string | null>(null);
     const partsRef = useRef(parts);
     partsRef.current = parts;
+    const model = useAIToolUseModel();
 
     // All parts in a batch have the same approval status (enforced by grouping logic in AIToolUseGroup)
     const firstTool = parts[0].data;
@@ -158,24 +188,24 @@ const AIToolUseBatch = memo(({ parts, isStreaming }: AIToolUseBatchProps) => {
 
         const interval = setInterval(() => {
             partsRef.current.forEach((part) => {
-                WaveAIModel.getInstance().toolUseKeepalive(part.data.toolcallid);
+                model.toolUseKeepalive(part.data.toolcallid);
             });
         }, 4000);
 
         return () => clearInterval(interval);
-    }, [isStreaming, effectiveApproval]);
+    }, [isStreaming, effectiveApproval, model]);
 
     const handleApprove = () => {
         setUserApprovalOverride("user-approved");
         parts.forEach((part) => {
-            WaveAIModel.getInstance().toolUseSendApproval(part.data.toolcallid, "user-approved");
+            model.toolUseSendApproval(part.data.toolcallid, "user-approved");
         });
     };
 
     const handleDeny = () => {
         setUserApprovalOverride("user-denied");
         parts.forEach((part) => {
-            WaveAIModel.getInstance().toolUseSendApproval(part.data.toolcallid, "user-denied");
+            model.toolUseSendApproval(part.data.toolcallid, "user-denied");
         });
     };
 
@@ -203,7 +233,7 @@ interface RestoreBackupModalProps {
 }
 
 const RestoreBackupModal = memo(({ part }: RestoreBackupModalProps) => {
-    const model = WaveAIModel.getInstance();
+    const model = useAIToolUseModel();
     const toolData = part.data;
     const status = useAtomValue(model.restoreBackupStatus);
     const error = useAtomValue(model.restoreBackupError);
@@ -294,7 +324,7 @@ interface AIToolUseProps {
 const AIToolUse = memo(({ part, isStreaming }: AIToolUseProps) => {
     const toolData = part.data;
     const [userApprovalOverride, setUserApprovalOverride] = useState<string | null>(null);
-    const model = WaveAIModel.getInstance();
+    const model = useAIToolUseModel();
     const restoreModalToolCallId = useAtomValue(model.restoreBackupModalToolCallId);
     const showRestoreModal = restoreModalToolCallId === toolData.toolcallid;
     const highlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -315,11 +345,11 @@ const AIToolUse = memo(({ part, isStreaming }: AIToolUseProps) => {
         if (!isStreaming || effectiveApproval !== "needs-approval") return;
 
         const interval = setInterval(() => {
-            WaveAIModel.getInstance().toolUseKeepalive(toolCallIdRef.current);
+            model.toolUseKeepalive(toolCallIdRef.current);
         }, 4000);
 
         return () => clearInterval(interval);
-    }, [isStreaming, effectiveApproval]);
+    }, [isStreaming, effectiveApproval, model]);
 
     useEffect(() => {
         return () => {
@@ -331,12 +361,12 @@ const AIToolUse = memo(({ part, isStreaming }: AIToolUseProps) => {
 
     const handleApprove = () => {
         setUserApprovalOverride("user-approved");
-        WaveAIModel.getInstance().toolUseSendApproval(toolData.toolcallid, "user-approved");
+        model.toolUseSendApproval(toolData.toolcallid, "user-approved");
     };
 
     const handleDeny = () => {
         setUserApprovalOverride("user-denied");
-        WaveAIModel.getInstance().toolUseSendApproval(toolData.toolcallid, "user-denied");
+        model.toolUseSendApproval(toolData.toolcallid, "user-denied");
     };
 
     const handleMouseEnter = () => {
@@ -376,7 +406,7 @@ const AIToolUse = memo(({ part, isStreaming }: AIToolUseProps) => {
 
     const handleOpenDiff = () => {
         recordTEvent("waveai:showdiff");
-        fireAndForget(() => WaveAIModel.getInstance().openDiff(toolData.inputfilename, toolData.toolcallid));
+        fireAndForget(() => model.openDiff(toolData.inputfilename, toolData.toolcallid));
     };
 
     return (

@@ -1,0 +1,526 @@
+// Copyright 2025, Command Line Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+import {
+    UseChatSendMessageType,
+    UseChatSetMessagesType,
+    WaveUIMessage,
+    WaveUIMessagePart,
+} from "@/app/aipanel/aitypes";
+import {
+    createDataUrl,
+    createImagePreview,
+    formatFileSizeError,
+    isAcceptableFile,
+    normalizeMimeType,
+    resizeImage,
+    validateFileSizeFromInfo,
+} from "@/app/aipanel/ai-utils";
+import { atoms, createBlock, getOrefMetaKeyAtom } from "@/app/store/global";
+import { globalStore } from "@/app/store/jotaiStore";
+import * as WOS from "@/app/store/wos";
+import { RpcApi } from "@/app/store/wshclientapi";
+import { TabRpcClient } from "@/app/store/wshrpcutil";
+import { getWebServerEndpoint } from "@/util/endpoints";
+import { base64ToArrayBuffer } from "@/util/util";
+import { ChatStatus } from "ai";
+import * as jotai from "jotai";
+import type React from "react";
+import type { AIPanelInputRef } from "@/app/aipanel/aipanelinput";
+
+export interface DroppedFile {
+    id: string;
+    file: File;
+    name: string;
+    type: string;
+    size: number;
+    previewUrl?: string;
+}
+
+export interface WaveAIBlockModelInterface {
+    blockId: string;
+    orefContext: ORef;
+    chatId: jotai.PrimitiveAtom<string>;
+    widgetAccessAtom: jotai.Atom<boolean>;
+    droppedFiles: jotai.PrimitiveAtom<DroppedFile[]>;
+    thinkingMode: jotai.PrimitiveAtom<string>;
+    errorMessage: jotai.PrimitiveAtom<string>;
+    modelAtom: jotai.Atom<string>;
+    containerWidth: jotai.PrimitiveAtom<number>;
+    codeBlockMaxWidth: jotai.Atom<number>;
+    inputAtom: jotai.PrimitiveAtom<string>;
+    isLoadingChatAtom: jotai.PrimitiveAtom<boolean>;
+    isAIStreaming: jotai.PrimitiveAtom<boolean>;
+    restoreBackupModalToolCallId: jotai.PrimitiveAtom<string | null>;
+    restoreBackupStatus: jotai.PrimitiveAtom<"idle" | "processing" | "success" | "error">;
+    restoreBackupError: jotai.PrimitiveAtom<string>;
+
+    getUseChatEndpointUrl(): string;
+    addFile(file: File): Promise<DroppedFile>;
+    addFileFromRemoteUri(draggedFile: DraggedFile): Promise<void>;
+    removeFile(fileId: string): void;
+    clearFiles(): void;
+    clearChat(): void;
+    setError(message: string): void;
+    clearError(): void;
+    registerInputRef(ref: React.RefObject<AIPanelInputRef>): void;
+    registerScrollToBottom(callback: () => void): void;
+    registerUseChatData(
+        sendMessage: UseChatSendMessageType,
+        setMessages: UseChatSetMessagesType,
+        status: ChatStatus,
+        stop: () => void
+    ): void;
+    scrollToBottom(): void;
+    focusInput(): void;
+    getAndClearMessage(): AIMessage | null;
+    hasNonEmptyInput(): boolean;
+    appendText(text: string, newLine?: boolean, opts?: { scrollToBottom?: boolean }): void;
+    setModel(model: string): void;
+    setWidgetAccess(enabled: boolean): void;
+    setThinkingMode(mode: string): void;
+    loadInitialChat(): Promise<WaveUIMessage[]>;
+    handleSubmit(): Promise<void>;
+    uiLoadInitialChat(): Promise<void>;
+    toolUseKeepalive(toolcallid: string): void;
+    toolUseSendApproval(toolcallid: string, approval: string): void;
+    openDiff(fileName: string, toolcallid: string): Promise<void>;
+    openRestoreBackupModal(toolcallid: string): void;
+    closeRestoreBackupModal(): void;
+    restoreBackup(toolcallid: string, backupFilePath: string, restoreToFileName: string): Promise<void>;
+    getChatId(): string;
+}
+
+/**
+ * Block-specific AI model that manages AI chat state for a single WaveAI block.
+ * Unlike WaveAIModel (singleton), this is instantiated per-block.
+ */
+export class WaveAIBlockModel implements WaveAIBlockModelInterface {
+    private inputRef: React.RefObject<AIPanelInputRef> | null = null;
+    private scrollToBottomCallback: (() => void) | null = null;
+    private useChatSendMessage: UseChatSendMessageType | null = null;
+    private useChatSetMessages: UseChatSetMessagesType | null = null;
+    private useChatStatus: ChatStatus = "ready";
+    private useChatStop: (() => void) | null = null;
+    realMessage: AIMessage | null = null;
+
+    blockId: string;
+    orefContext: ORef;
+    isAIStreaming = jotai.atom(false);
+
+    widgetAccessAtom: jotai.Atom<boolean>;
+    droppedFiles: jotai.PrimitiveAtom<DroppedFile[]> = jotai.atom([]);
+    chatId: jotai.PrimitiveAtom<string>;
+    thinkingMode: jotai.PrimitiveAtom<string> = jotai.atom("balanced");
+    errorMessage: jotai.PrimitiveAtom<string> = jotai.atom(null) as jotai.PrimitiveAtom<string>;
+    modelAtom: jotai.Atom<string>;
+    containerWidth: jotai.PrimitiveAtom<number> = jotai.atom(0);
+    codeBlockMaxWidth: jotai.Atom<number>;
+    inputAtom: jotai.PrimitiveAtom<string> = jotai.atom("");
+    isLoadingChatAtom: jotai.PrimitiveAtom<boolean> = jotai.atom(false);
+    isChatEmpty: boolean = true;
+    restoreBackupModalToolCallId: jotai.PrimitiveAtom<string | null> = jotai.atom(null) as jotai.PrimitiveAtom<
+        string | null
+    >;
+    restoreBackupStatus: jotai.PrimitiveAtom<"idle" | "processing" | "success" | "error"> = jotai.atom("idle");
+    restoreBackupError: jotai.PrimitiveAtom<string> = jotai.atom(null) as jotai.PrimitiveAtom<string>;
+
+    constructor(blockId: string) {
+        this.blockId = blockId;
+        this.orefContext = WOS.makeORef("block", blockId);
+        this.chatId = jotai.atom(null) as jotai.PrimitiveAtom<string>;
+
+        this.modelAtom = jotai.atom((get) => {
+            const modelMetaAtom = getOrefMetaKeyAtom(this.orefContext, "waveai:model");
+            return get(modelMetaAtom) ?? "gpt-5.1";
+        });
+
+        this.widgetAccessAtom = jotai.atom((get) => {
+            const widgetAccessMetaAtom = getOrefMetaKeyAtom(this.orefContext, "waveai:widgetcontext");
+            const value = get(widgetAccessMetaAtom);
+            return value ?? true;
+        });
+
+        this.codeBlockMaxWidth = jotai.atom((get) => {
+            const width = get(this.containerWidth);
+            return width > 0 ? width - 35 : 0;
+        });
+    }
+
+    getUseChatEndpointUrl(): string {
+        return `${getWebServerEndpoint()}/api/post-chat-message`;
+    }
+
+    async addFile(file: File): Promise<DroppedFile> {
+        const processedFile = await resizeImage(file);
+
+        const droppedFile: DroppedFile = {
+            id: crypto.randomUUID(),
+            file: processedFile,
+            name: processedFile.name,
+            type: processedFile.type,
+            size: processedFile.size,
+        };
+
+        if (processedFile.type.startsWith("image/")) {
+            const previewDataUrl = await createImagePreview(processedFile);
+            if (previewDataUrl) {
+                droppedFile.previewUrl = previewDataUrl;
+            }
+        }
+
+        const currentFiles = globalStore.get(this.droppedFiles);
+        globalStore.set(this.droppedFiles, [...currentFiles, droppedFile]);
+
+        return droppedFile;
+    }
+
+    async addFileFromRemoteUri(draggedFile: DraggedFile): Promise<void> {
+        if (draggedFile.isDir) {
+            this.setError("Cannot add directories to Wave AI. Please select a file.");
+            return;
+        }
+
+        try {
+            const fileInfo = await RpcApi.FileInfoCommand(TabRpcClient, { info: { path: draggedFile.uri } }, null);
+            if (fileInfo.notfound) {
+                this.setError(`File not found: ${draggedFile.relName}`);
+                return;
+            }
+            if (fileInfo.isdir) {
+                this.setError("Cannot add directories to Wave AI. Please select a file.");
+                return;
+            }
+
+            const mimeType = fileInfo.mimetype || "application/octet-stream";
+            const fileSize = fileInfo.size || 0;
+            const sizeError = validateFileSizeFromInfo(draggedFile.relName, fileSize, mimeType);
+            if (sizeError) {
+                this.setError(formatFileSizeError(sizeError));
+                return;
+            }
+
+            const fileData = await RpcApi.FileReadCommand(TabRpcClient, { info: { path: draggedFile.uri } }, null);
+            if (!fileData.data64) {
+                this.setError(`Failed to read file: ${draggedFile.relName}`);
+                return;
+            }
+
+            const buffer = base64ToArrayBuffer(fileData.data64);
+            const file = new File([buffer], draggedFile.relName, { type: mimeType });
+            if (!isAcceptableFile(file)) {
+                this.setError(
+                    `File type not supported: ${draggedFile.relName}. Supported: images, PDFs, and text/code files.`
+                );
+                return;
+            }
+
+            await this.addFile(file);
+        } catch (error) {
+            console.error("Error handling FILE_ITEM drop:", error);
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            this.setError(`Failed to add file: ${errorMsg}`);
+        }
+    }
+
+    removeFile(fileId: string) {
+        const currentFiles = globalStore.get(this.droppedFiles);
+        const updatedFiles = currentFiles.filter((f) => f.id !== fileId);
+        globalStore.set(this.droppedFiles, updatedFiles);
+    }
+
+    clearFiles() {
+        const currentFiles = globalStore.get(this.droppedFiles);
+
+        currentFiles.forEach((file) => {
+            if (file.previewUrl) {
+                URL.revokeObjectURL(file.previewUrl);
+            }
+        });
+
+        globalStore.set(this.droppedFiles, []);
+    }
+
+    clearChat() {
+        this.useChatStop?.();
+        this.clearFiles();
+        this.isChatEmpty = true;
+        const newChatId = crypto.randomUUID();
+        globalStore.set(this.chatId, newChatId);
+
+        RpcApi.SetRTInfoCommand(TabRpcClient, {
+            oref: this.orefContext,
+            data: { "waveai:chatid": newChatId },
+        });
+
+        this.useChatSetMessages?.([]);
+    }
+
+    setError(message: string) {
+        globalStore.set(this.errorMessage, message);
+    }
+
+    clearError() {
+        globalStore.set(this.errorMessage, null);
+    }
+
+    registerInputRef(ref: React.RefObject<AIPanelInputRef>) {
+        this.inputRef = ref;
+    }
+
+    registerScrollToBottom(callback: () => void) {
+        this.scrollToBottomCallback = callback;
+    }
+
+    registerUseChatData(
+        sendMessage: UseChatSendMessageType,
+        setMessages: UseChatSetMessagesType,
+        status: ChatStatus,
+        stop: () => void
+    ) {
+        this.useChatSendMessage = sendMessage;
+        this.useChatSetMessages = setMessages;
+        this.useChatStatus = status;
+        this.useChatStop = stop;
+    }
+
+    scrollToBottom() {
+        this.scrollToBottomCallback?.();
+    }
+
+    focusInput() {
+        if (this.inputRef?.current) {
+            this.inputRef.current.focus();
+        }
+    }
+
+    getAndClearMessage(): AIMessage | null {
+        const msg = this.realMessage;
+        this.realMessage = null;
+        return msg;
+    }
+
+    hasNonEmptyInput(): boolean {
+        const input = globalStore.get(this.inputAtom);
+        return input != null && input.trim().length > 0;
+    }
+
+    appendText(text: string, newLine?: boolean, opts?: { scrollToBottom?: boolean }) {
+        const currentInput = globalStore.get(this.inputAtom);
+        let newInput = currentInput;
+
+        if (newInput.length > 0) {
+            if (newLine) {
+                if (!newInput.endsWith("\n")) {
+                    newInput += "\n";
+                }
+            } else if (!newInput.endsWith(" ") && !newInput.endsWith("\n")) {
+                newInput += " ";
+            }
+        }
+
+        newInput += text;
+        globalStore.set(this.inputAtom, newInput);
+
+        if (opts?.scrollToBottom && this.inputRef?.current) {
+            setTimeout(() => this.inputRef.current.scrollToBottom(), 10);
+        }
+    }
+
+    setModel(model: string) {
+        RpcApi.SetMetaCommand(TabRpcClient, {
+            oref: this.orefContext,
+            meta: { "waveai:model": model },
+        });
+    }
+
+    setWidgetAccess(enabled: boolean) {
+        RpcApi.SetMetaCommand(TabRpcClient, {
+            oref: this.orefContext,
+            meta: { "waveai:widgetcontext": enabled },
+        });
+    }
+
+    setThinkingMode(mode: string) {
+        globalStore.set(this.thinkingMode, mode);
+        RpcApi.SetRTInfoCommand(TabRpcClient, {
+            oref: this.orefContext,
+            data: { "waveai:thinkingmode": mode },
+        });
+    }
+
+    async loadInitialChat(): Promise<WaveUIMessage[]> {
+        const rtInfo = await RpcApi.GetRTInfoCommand(TabRpcClient, {
+            oref: this.orefContext,
+        });
+        let chatIdValue = rtInfo?.["waveai:chatid"];
+        if (chatIdValue == null) {
+            chatIdValue = crypto.randomUUID();
+            RpcApi.SetRTInfoCommand(TabRpcClient, {
+                oref: this.orefContext,
+                data: { "waveai:chatid": chatIdValue },
+            });
+        }
+        globalStore.set(this.chatId, chatIdValue);
+
+        const thinkingModeValue = rtInfo?.["waveai:thinkingmode"] ?? "balanced";
+        globalStore.set(this.thinkingMode, thinkingModeValue);
+
+        try {
+            const chatData = await RpcApi.GetWaveAIChatCommand(TabRpcClient, { chatid: chatIdValue });
+            const messages: UIMessage[] = chatData?.messages ?? [];
+            this.isChatEmpty = messages.length === 0;
+            return messages as WaveUIMessage[];
+        } catch (error) {
+            console.error("Failed to load chat:", error);
+            this.setError("Failed to load chat. Starting new chat...");
+
+            this.clearChat();
+            return [];
+        }
+    }
+
+    async handleSubmit() {
+        const input = globalStore.get(this.inputAtom);
+        const droppedFiles = globalStore.get(this.droppedFiles);
+
+        if (input.trim() === "/clear" || input.trim() === "/new") {
+            this.clearChat();
+            globalStore.set(this.inputAtom, "");
+            return;
+        }
+
+        if (
+            (!input.trim() && droppedFiles.length === 0) ||
+            (this.useChatStatus !== "ready" && this.useChatStatus !== "error") ||
+            globalStore.get(this.isLoadingChatAtom)
+        ) {
+            return;
+        }
+
+        this.clearError();
+
+        const aiMessageParts: AIMessagePart[] = [];
+        const uiMessageParts: WaveUIMessagePart[] = [];
+
+        if (input.trim()) {
+            aiMessageParts.push({ type: "text", text: input.trim() });
+            uiMessageParts.push({ type: "text", text: input.trim() });
+        }
+
+        for (const droppedFile of droppedFiles) {
+            const normalizedMimeType = normalizeMimeType(droppedFile.file);
+            const dataUrl = await createDataUrl(droppedFile.file);
+
+            aiMessageParts.push({
+                type: "file",
+                filename: droppedFile.name,
+                mimetype: normalizedMimeType,
+                url: dataUrl,
+                size: droppedFile.file.size,
+                previewurl: droppedFile.previewUrl,
+            });
+
+            uiMessageParts.push({
+                type: "data-userfile",
+                data: {
+                    filename: droppedFile.name,
+                    mimetype: normalizedMimeType,
+                    size: droppedFile.file.size,
+                    previewurl: droppedFile.previewUrl,
+                },
+            });
+        }
+
+        const realMessage: AIMessage = {
+            messageid: crypto.randomUUID(),
+            parts: aiMessageParts,
+        };
+        this.realMessage = realMessage;
+
+        this.useChatSendMessage?.({ parts: uiMessageParts });
+
+        this.isChatEmpty = false;
+        globalStore.set(this.inputAtom, "");
+        this.clearFiles();
+    }
+
+    async uiLoadInitialChat() {
+        globalStore.set(this.isLoadingChatAtom, true);
+        const messages = await this.loadInitialChat();
+        this.useChatSetMessages?.(messages);
+        globalStore.set(this.isLoadingChatAtom, false);
+        setTimeout(() => {
+            this.scrollToBottom();
+        }, 100);
+    }
+
+    toolUseKeepalive(toolcallid: string) {
+        RpcApi.WaveAIToolApproveCommand(
+            TabRpcClient,
+            {
+                toolcallid: toolcallid,
+                keepalive: true,
+            },
+            { noresponse: true }
+        );
+    }
+
+    toolUseSendApproval(toolcallid: string, approval: string) {
+        RpcApi.WaveAIToolApproveCommand(TabRpcClient, {
+            toolcallid: toolcallid,
+            approval: approval,
+        });
+    }
+
+    async openDiff(fileName: string, toolcallid: string) {
+        const chatId = this.getChatId();
+
+        if (!chatId || !fileName) {
+            console.error("Missing chatId or fileName for opening diff", chatId, fileName);
+            return;
+        }
+
+        const blockDef: BlockDef = {
+            meta: {
+                view: "aifilediff",
+                file: fileName,
+                "aifilediff:chatid": chatId,
+                "aifilediff:toolcallid": toolcallid,
+            },
+        };
+        await createBlock(blockDef, false, true);
+    }
+
+    openRestoreBackupModal(toolcallid: string) {
+        globalStore.set(this.restoreBackupModalToolCallId, toolcallid);
+    }
+
+    closeRestoreBackupModal() {
+        globalStore.set(this.restoreBackupModalToolCallId, null);
+        globalStore.set(this.restoreBackupStatus, "idle");
+        globalStore.set(this.restoreBackupError, null);
+    }
+
+    async restoreBackup(toolcallid: string, backupFilePath: string, restoreToFileName: string) {
+        globalStore.set(this.restoreBackupStatus, "processing");
+        globalStore.set(this.restoreBackupError, null);
+        try {
+            await RpcApi.FileRestoreBackupCommand(TabRpcClient, {
+                backupfilepath: backupFilePath,
+                restoretofilename: restoreToFileName,
+            });
+            console.log("Backup restored successfully:", { toolcallid, backupFilePath, restoreToFileName });
+            globalStore.set(this.restoreBackupStatus, "success");
+        } catch (error) {
+            console.error("Failed to restore backup:", error);
+            const errorMsg = error?.message || String(error);
+            globalStore.set(this.restoreBackupError, errorMsg);
+            globalStore.set(this.restoreBackupStatus, "error");
+        }
+    }
+
+    getChatId(): string {
+        return globalStore.get(this.chatId);
+    }
+}
