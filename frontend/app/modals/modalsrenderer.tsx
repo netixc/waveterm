@@ -30,22 +30,24 @@ const ModalsRenderer = () => {
         rtn.push(<UpgradeOnboardingModal key={UpgradeOnboardingModal.displayName} />);
     }
     useEffect(() => {
-        if (!clientData.tosagreed) {
-            setNewInstallOnboardingOpen(true);
-        }
+        // Disabled: onboarding modal removed
+        // if (!clientData.tosagreed) {
+        //     setNewInstallOnboardingOpen(true);
+        // }
     }, [clientData]);
 
     useEffect(() => {
-        if (!globalPrimaryTabStartup) {
-            return;
-        }
-        if (!clientData.tosagreed) {
-            return;
-        }
-        const lastVersion = clientData.meta?.["onboarding:lastversion"] ?? "v0.0.0";
-        if (semver.lt(lastVersion, CurrentOnboardingVersion)) {
-            setUpgradeOnboardingOpen(true);
-        }
+        // Disabled: upgrade onboarding modal removed
+        // if (!globalPrimaryTabStartup) {
+        //     return;
+        // }
+        // if (!clientData.tosagreed) {
+        //     return;
+        // }
+        // const lastVersion = clientData.meta?.["onboarding:lastversion"] ?? "v0.0.0";
+        // if (semver.lt(lastVersion, CurrentOnboardingVersion)) {
+        //     setUpgradeOnboardingOpen(true);
+        // }
     }, []);
     useEffect(() => {
         globalStore.set(atoms.modalOpen, rtn.length > 0);
