@@ -163,6 +163,7 @@ func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bo
 		tools = append(tools, GetDeleteTextFileToolDefinition())
 		tools = append(tools, GetWidgetOpenToolDefinition(tabid))
 		tools = append(tools, GetWidgetCloseToolDefinition(tabid))
+		tools = append(tools, GetWidgetRenameToolDefinition(tabid))
 		viewTypes := make(map[string]bool)
 		for _, block := range blocks {
 			if block.Meta == nil {
@@ -201,7 +202,13 @@ func GenerateCurrentTabStatePrompt(blocks []*waveobj.Block, widgetAccess bool) s
 			continue
 		}
 		blockIdPrefix := block.OID[:8]
-		fullDesc := fmt.Sprintf("(%s) %s", blockIdPrefix, desc)
+		displayName, hasDisplayName := block.Meta["display:name"].(string)
+		var fullDesc string
+		if hasDisplayName && displayName != "" {
+			fullDesc = fmt.Sprintf("(%s) [%s] %s", blockIdPrefix, displayName, desc)
+		} else {
+			fullDesc = fmt.Sprintf("(%s) %s", blockIdPrefix, desc)
+		}
 		widgetDescriptions = append(widgetDescriptions, fullDesc)
 	}
 

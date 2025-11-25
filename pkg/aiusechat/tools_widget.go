@@ -13,6 +13,7 @@ import (
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wcore"
 	"github.com/wavetermdev/waveterm/pkg/wps"
+	"github.com/wavetermdev/waveterm/pkg/wstore"
 )
 
 type WidgetOpenToolInput struct {
@@ -252,6 +253,105 @@ func GetWidgetCloseToolDefinition(tabId string) uctypes.ToolDefinition {
 			return map[string]any{
 				"success": true,
 				"message": fmt.Sprintf("widget %s closed", parsed.WidgetId),
+			}, nil
+		},
+	}
+}
+
+type WidgetRenameToolInput struct {
+	WidgetId string `json:"widget_id"`
+	Name     string `json:"name"`
+}
+
+func parseWidgetRenameInput(input any) (*WidgetRenameToolInput, error) {
+	result := &WidgetRenameToolInput{}
+
+	if input == nil {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	inputBytes, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal input: %w", err)
+	}
+
+	if err := json.Unmarshal(inputBytes, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal input: %w", err)
+	}
+
+	if result.WidgetId == "" {
+		return nil, fmt.Errorf("widget_id is required")
+	}
+
+	if result.Name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
+	return result, nil
+}
+
+func GetWidgetRenameToolDefinition(tabId string) uctypes.ToolDefinition {
+	return uctypes.ToolDefinition{
+		Name:        "widget_rename",
+		DisplayName: "Rename Widget",
+		Description: "Set a custom display name for a widget. This makes it easier to identify widgets when multiple are open. The name will appear in brackets in the widget list.",
+		ToolLogName: "widget:rename",
+		Strict:      true,
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"widget_id": map[string]any{
+					"type":        "string",
+					"description": "8-character widget ID of the widget to rename",
+				},
+				"name": map[string]any{
+					"type":        "string",
+					"description": "The new display name for the widget",
+				},
+			},
+			"required":             []string{"widget_id", "name"},
+			"additionalProperties": false,
+		},
+		ToolCallDesc: func(input any, output any, toolUseData *uctypes.UIMessageDataToolUse) string {
+			parsed, err := parseWidgetRenameInput(input)
+			if err != nil {
+				return fmt.Sprintf("error parsing input: %v", err)
+			}
+			return fmt.Sprintf("renaming widget %s to %q", parsed.WidgetId, parsed.Name)
+		},
+		ToolAnyCallback: func(input any, toolUseData *uctypes.UIMessageDataToolUse) (any, error) {
+			parsed, err := parseWidgetRenameInput(input)
+			if err != nil {
+				return nil, err
+			}
+
+			ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelFn()
+			ctx = waveobj.ContextWithUpdates(ctx)
+
+			fullBlockId, err := wcore.ResolveBlockIdFromPrefix(ctx, tabId, parsed.WidgetId)
+			if err != nil {
+				return nil, fmt.Errorf("failed to find widget with ID %s: %w", parsed.WidgetId, err)
+			}
+
+			blockORef := waveobj.MakeORef(waveobj.OType_Block, fullBlockId)
+			meta := map[string]any{
+				"display:name": parsed.Name,
+			}
+
+			err = wstore.UpdateObjectMeta(ctx, blockORef, meta, false)
+			if err != nil {
+				return nil, fmt.Errorf("failed to rename widget: %w", err)
+			}
+
+			wcore.SendWaveObjUpdate(blockORef)
+
+			updates := waveobj.ContextGetUpdatesRtn(ctx)
+			wps.Broker.SendUpdateEvents(updates)
+
+			return map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("widget %s renamed to %q", parsed.WidgetId, parsed.Name),
 			}, nil
 		},
 	}
