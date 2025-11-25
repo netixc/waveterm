@@ -391,7 +391,7 @@ func GetTermRunCommandToolDefinition(tabId string) uctypes.ToolDefinition {
 					BlockId:     fullBlockId,
 					InputData64: inputData64,
 				},
-				&wshrpc.RpcOpts{Route: wshutil.MakeFeBlockRouteId(fullBlockId)},
+				nil,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to send command to terminal: %w", err)
