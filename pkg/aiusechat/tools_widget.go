@@ -239,6 +239,7 @@ func GetWidgetCloseToolDefinition(tabId string) uctypes.ToolDefinition {
 
 			ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelFn()
+			ctx = waveobj.ContextWithUpdates(ctx)
 
 			fullBlockId, err := wcore.ResolveBlockIdFromPrefix(ctx, tabId, parsed.WidgetId)
 			if err != nil {
@@ -249,6 +250,9 @@ func GetWidgetCloseToolDefinition(tabId string) uctypes.ToolDefinition {
 			if err != nil {
 				return nil, fmt.Errorf("failed to close widget: %w", err)
 			}
+
+			updates := waveobj.ContextGetUpdatesRtn(ctx)
+			wps.Broker.SendUpdateEvents(updates)
 
 			return map[string]any{
 				"success": true,
