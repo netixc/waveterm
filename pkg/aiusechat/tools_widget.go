@@ -66,7 +66,7 @@ func GetWidgetOpenToolDefinition(tabId string) uctypes.ToolDefinition {
 		DisplayName: "Open Widget",
 		Description: "Open a new widget in the current tab. Supported widget types: term (terminal), web (web browser), preview (file preview), cpuplot (CPU graph)",
 		ToolLogName: "widget:open",
-		Strict:      true,
+		Strict:      false,
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
