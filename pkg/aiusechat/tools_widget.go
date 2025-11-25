@@ -339,7 +339,7 @@ func GetWidgetRenameToolDefinition(tabId string) uctypes.ToolDefinition {
 				"display:name": parsed.Name,
 			}
 
-			err = wstore.UpdateObjectMeta(ctx, blockORef, meta, false)
+			err = wstore.UpdateObjectMeta(ctx, blockORef, meta, true)
 			if err != nil {
 				return nil, fmt.Errorf("failed to rename widget: %w", err)
 			}
