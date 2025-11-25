@@ -151,8 +151,6 @@ func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bo
 		}
 	}
 	tabState := GenerateCurrentTabStatePrompt(blocks, widgetAccess)
-	// for debugging
-	// log.Printf("TABPROMPT %s\n", tabState)
 	var tools []uctypes.ToolDefinition
 	if widgetAccess {
 		tools = append(tools, GetCaptureScreenshotToolDefinition(tabid))

@@ -7,6 +7,7 @@ import { Button } from "@/app/element/button";
 import { useDimensionsWithCallbackRef } from "@/app/hook/useDimensions";
 import { ChangeConnectionBlockModal } from "@/app/modals/conntypeahead";
 import { ContextMenuModel } from "@/app/store/contextmenu";
+import { modalsModel } from "@/app/store/modalmodel";
 import {
     atoms,
     getBlockComponentModel,
@@ -38,16 +39,12 @@ import { BlockFrameProps } from "./blocktypes";
 
 const NumActiveConnColors = 8;
 
-async function handleRenameBlock(blockData: Block) {
+function handleRenameBlock(blockData: Block) {
     const currentName = blockData?.meta?.["display:name"] || "";
-    const newName = prompt("Enter new name for this widget:", currentName);
-    if (newName !== null) {
-        const oref = WOS.makeORef("block", blockData.oid);
-        await RpcApi.SetMetaCommand(TabRpcClient, {
-            oref: oref,
-            meta: { "display:name": newName || null },
-        });
-    }
+    modalsModel.pushModal("RenameWidgetModal", {
+        blockOid: blockData.oid,
+        currentName: currentName,
+    });
 }
 
 function handleHeaderContextMenu(
@@ -218,9 +215,6 @@ const BlockFrame_Header = ({
         recordTEvent("action:magnify", { "block:view": viewName });
     }, [magnified]);
 
-    if (blockData?.meta?.["display:name"]) {
-        viewName = blockData.meta["display:name"];
-    }
     if (blockData?.meta?.["frame:title"]) {
         viewName = blockData.meta["frame:title"];
     }
@@ -230,6 +224,9 @@ const BlockFrame_Header = ({
     if (blockData?.meta?.["frame:text"]) {
         headerTextUnion = blockData.meta["frame:text"];
     }
+
+    // Show custom display name if set, otherwise show first 8 chars of block ID
+    const widgetLabel = blockData?.meta?.["display:name"] || nodeModel.blockId.substring(0, 8);
 
     const onContextMenu = React.useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
@@ -288,7 +285,7 @@ const BlockFrame_Header = ({
             <div className="block-frame-default-header-iconview">
                 {viewIconElem}
                 <div className="block-frame-view-type">{viewName}</div>
-                {showBlockIds && <div className="block-frame-blockid">[{nodeModel.blockId.substring(0, 8)}]</div>}
+                <div className="block-frame-blockid">[{widgetLabel}]</div>
             </div>
             {manageConnection && (
                 <ConnectionButton
