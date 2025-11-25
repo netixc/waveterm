@@ -5,6 +5,7 @@ package aiusechat
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -296,6 +297,110 @@ func GetTermCommandOutputToolDefinition(tabId string) uctypes.ToolDefinition {
 				return nil, fmt.Errorf("failed to get command output: %w", err)
 			}
 			return output, nil
+		},
+	}
+}
+
+type TermRunCommandToolInput struct {
+	WidgetId string `json:"widget_id"`
+	Command  string `json:"command"`
+}
+
+func parseTermRunCommandInput(input any) (*TermRunCommandToolInput, error) {
+	result := &TermRunCommandToolInput{}
+
+	if input == nil {
+		return nil, fmt.Errorf("input is required")
+	}
+
+	inputBytes, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal input: %w", err)
+	}
+
+	if err := json.Unmarshal(inputBytes, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal input: %w", err)
+	}
+
+	if result.WidgetId == "" {
+		return nil, fmt.Errorf("widget_id is required")
+	}
+
+	if result.Command == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+
+	return result, nil
+}
+
+func GetTermRunCommandToolDefinition(tabId string) uctypes.ToolDefinition {
+	return uctypes.ToolDefinition{
+		Name:        "term_run_command",
+		DisplayName: "Run Terminal Command",
+		Description: "Execute a command in a terminal widget. The command will be typed into the terminal and executed. Use term_get_scrollback to read the output afterwards.",
+		ToolLogName: "term:runcommand",
+		Strict:      true,
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"widget_id": map[string]any{
+					"type":        "string",
+					"description": "8-character widget ID of the terminal widget",
+				},
+				"command": map[string]any{
+					"type":        "string",
+					"description": "The command to execute in the terminal",
+				},
+			},
+			"required":             []string{"widget_id", "command"},
+			"additionalProperties": false,
+		},
+		ToolCallDesc: func(input any, output any, toolUseData *uctypes.UIMessageDataToolUse) string {
+			parsed, err := parseTermRunCommandInput(input)
+			if err != nil {
+				return fmt.Sprintf("error parsing input: %v", err)
+			}
+			cmdDisplay := parsed.Command
+			if len(cmdDisplay) > 50 {
+				cmdDisplay = cmdDisplay[:47] + "..."
+			}
+			return fmt.Sprintf("running command %q in terminal %s", cmdDisplay, parsed.WidgetId)
+		},
+		ToolAnyCallback: func(input any, toolUseData *uctypes.UIMessageDataToolUse) (any, error) {
+			parsed, err := parseTermRunCommandInput(input)
+			if err != nil {
+				return nil, err
+			}
+
+			ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelFn()
+
+			fullBlockId, err := wcore.ResolveBlockIdFromPrefix(ctx, tabId, parsed.WidgetId)
+			if err != nil {
+				return nil, fmt.Errorf("failed to find terminal widget: %w", err)
+			}
+
+			// Add newline to execute the command
+			commandWithNewline := parsed.Command + "\n"
+			inputData64 := base64.StdEncoding.EncodeToString([]byte(commandWithNewline))
+
+			rpcClient := wshclient.GetBareRpcClient()
+			err = wshclient.ControllerInputCommand(
+				rpcClient,
+				wshrpc.CommandBlockInputData{
+					BlockId:     fullBlockId,
+					InputData64: inputData64,
+				},
+				&wshrpc.RpcOpts{Route: wshutil.MakeFeBlockRouteId(fullBlockId)},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to send command to terminal: %w", err)
+			}
+
+			return map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("command sent to terminal %s", parsed.WidgetId),
+			}, nil
 		},
 	}
 }
