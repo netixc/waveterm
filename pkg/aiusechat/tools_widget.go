@@ -246,6 +246,17 @@ func GetWidgetCloseToolDefinition(tabId string) uctypes.ToolDefinition {
 				return nil, fmt.Errorf("failed to find widget with ID %s: %w", parsed.WidgetId, err)
 			}
 
+			// Queue layout action to remove the block from the layout tree
+			// This must happen before DeleteBlock so the frontend can properly resize
+			layoutAction := waveobj.LayoutActionData{
+				ActionType: wcore.LayoutActionDataType_Remove,
+				BlockId:    fullBlockId,
+			}
+			err = wcore.QueueLayoutActionForTab(ctx, tabId, layoutAction)
+			if err != nil {
+				return nil, fmt.Errorf("failed to queue layout action: %w", err)
+			}
+
 			err = wcore.DeleteBlock(ctx, fullBlockId, true)
 			if err != nil {
 				return nil, fmt.Errorf("failed to close widget: %w", err)
