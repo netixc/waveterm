@@ -145,7 +145,8 @@
         "use-device-pixel-ratio": "^1.1.2",
         "winston": "^3.18.3",
         "ws": "^8.18.3",
-        "yaml": "^2.7.1"
+        "yaml": "^2.7.1",
+        "zod": "^3.25.67"
     },
     "packageManager": "npm@10.9.2",
     "workspaces": [
