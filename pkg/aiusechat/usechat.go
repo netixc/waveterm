@@ -87,9 +87,10 @@ var SystemPromptText_OpenAI = strings.Join([]string{
 	`If a request would execute dangerous or destructive actions, warn briefly and provide a safer alternative.`,
 	`If output is very long, prefer a brief summary plus a copy-ready fenced block or offer a follow-up chunking strategy.`,
 
-	`You can write and edit local files on disk using available tools, but you cannot execute shell commands, run code in the terminal, or read/write remote files.`,
-	`If the user asks you to execute commands or run code, or deal with remote files say that these features aren't available yet AND make sure to say that they are coming soon (stay tuned for updates).`,
-	`Instead, show them exactly what command or code they could copy-paste to run manually.`,
+	`You can write and edit local files on disk using available tools.`,
+	`You can execute shell commands in terminal widgets using the term_run_command tool when a terminal is open.`,
+	`You cannot read/write remote files.`,
+	`If asked to deal with remote files, say that these features aren't available yet AND make sure to say that they are coming soon (stay tuned for updates).`,
 
 	// Final reminder
 	`You have NO API access to widgets or Wave unless provided via an explicit tool.`,
