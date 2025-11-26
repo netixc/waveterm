@@ -29,7 +29,7 @@ declare global {
         "ai:apitokensecretname"?: string;
         "ai:capabilities"?: string[];
         "waveai:cloud"?: boolean;
-        "waveai:premium"?: boolean;
+        "waveai:premium": boolean;
     };
 
     // wshrpc.ActivityDisplayType
@@ -769,6 +769,7 @@ declare global {
         termthemes: {[key: string]: TermThemeType};
         connections: {[key: string]: ConnKeywords};
         bookmarks: {[key: string]: WebBookmark};
+        waveai: {[key: string]: AIModeConfigType};
         configerrors: ConfigError[];
     };
 
@@ -949,7 +950,7 @@ declare global {
         "builder:appid"?: string;
         "builder:env"?: {[key: string]: string};
         "waveai:chatid"?: string;
-        "waveai:thinkingmode"?: string;
+        "waveai:mode"?: string;
         "waveai:maxoutputtokens"?: number;
     };
 
@@ -1259,7 +1260,7 @@ declare global {
         "waveai:requestdurms"?: number;
         "waveai:widgetaccess"?: boolean;
         "waveai:thinkinglevel"?: string;
-        "waveai:thinkingmode"?: string;
+        "waveai:mode"?: string;
         "waveai:feedback"?: "good" | "bad";
         "waveai:action"?: string;
         $set?: TEventUserProps;
