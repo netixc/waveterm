@@ -13,6 +13,25 @@ declare global {
         data64: string;
     };
 
+    // wconfig.AIModeConfigType
+    type AIModeConfigType = {
+        "display:name": string;
+        "display:order"?: number;
+        "display:icon": string;
+        "display:shortdesc"?: string;
+        "display:description": string;
+        "ai:apitype": string;
+        "ai:model": string;
+        "ai:thinkinglevel": string;
+        "ai:baseurl"?: string;
+        "ai:apiversion"?: string;
+        "ai:apitoken"?: string;
+        "ai:apitokensecretname"?: string;
+        "ai:capabilities"?: string[];
+        "waveai:cloud"?: boolean;
+        "waveai:premium"?: boolean;
+    };
+
     // wshrpc.ActivityDisplayType
     type ActivityDisplayType = {
         width: number;
