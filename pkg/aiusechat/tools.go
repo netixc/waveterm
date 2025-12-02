@@ -162,6 +162,7 @@ func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bo
 		tools = append(tools, GetWidgetOpenToolDefinition(tabid))
 		tools = append(tools, GetWidgetCloseToolDefinition(tabid))
 		tools = append(tools, GetWidgetRenameToolDefinition(tabid))
+		tools = append(tools, GetWidgetMoveToolDefinition(tabid))
 		viewTypes := make(map[string]bool)
 		for _, block := range blocks {
 			if block.Meta == nil {

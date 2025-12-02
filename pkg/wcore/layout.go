@@ -23,6 +23,8 @@ const (
 	LayoutActionDataType_SplitHorizontal = "splithorizontal"
 	LayoutActionDataType_SplitVertical   = "splitvertical"
 	LayoutActionDataType_CleanupOrphaned = "cleanuporphaned"
+	LayoutActionDataType_MoveHorizontal  = "movehorizontal"  // Move existing block horizontally relative to target
+	LayoutActionDataType_MoveVertical    = "movevertical"    // Move existing block vertically relative to target
 )
 
 type PortableLayout []struct {

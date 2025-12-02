@@ -10,7 +10,7 @@ import { splitAtom } from "jotai/utils";
 import { createRef, CSSProperties } from "react";
 import { debounce } from "throttle-debounce";
 import { getLayoutStateAtomFromTab } from "./layoutAtom";
-import { balanceNode, findNode, newLayoutNode, walkNodes } from "./layoutNode";
+import { balanceNode, findNode, findParent, newLayoutNode, removeChild, walkNodes } from "./layoutNode";
 import {
     clearTree,
     computeMoveNode,
@@ -560,6 +560,61 @@ export class LayoutModel {
                     position: action.position,
                 };
                 this.treeReducer(splitAction, false);
+                break;
+            }
+            case LayoutTreeActionType.MoveHorizontal:
+            case LayoutTreeActionType.MoveVertical: {
+                // Find the node to move
+                const nodeToMove = this?.getNodeByBlockId(action.blockid);
+                if (!nodeToMove) {
+                    console.error(
+                        "Cannot apply eventbus layout action Move, could not find node with blockId",
+                        action.blockid
+                    );
+                    break;
+                }
+                // Find the target node
+                const targetNode = this?.getNodeByBlockId(action.targetblockid);
+                if (!targetNode) {
+                    console.error(
+                        "Cannot apply eventbus layout action Move, could not find target node with blockId",
+                        action.targetblockid
+                    );
+                    break;
+                }
+                if (action.position != "before" && action.position != "after") {
+                    console.error(
+                        "Cannot apply eventbus layout action Move, invalid position",
+                        action.position
+                    );
+                    break;
+                }
+                // Remove the node from its current position
+                const oldParent = findParent(this.treeState.rootNode, nodeToMove.id);
+                if (oldParent) {
+                    removeChild(oldParent, nodeToMove);
+                }
+                // Now use split logic to insert at new position
+                const isHorizontal = action.actiontype === LayoutTreeActionType.MoveHorizontal;
+                if (isHorizontal) {
+                    const splitAction: LayoutTreeSplitHorizontalAction = {
+                        type: LayoutTreeActionType.SplitHorizontal,
+                        targetNodeId: targetNode.id,
+                        newNode: nodeToMove,
+                        position: action.position,
+                        focused: action.focused,
+                    };
+                    this.treeReducer(splitAction, false);
+                } else {
+                    const splitAction: LayoutTreeSplitVerticalAction = {
+                        type: LayoutTreeActionType.SplitVertical,
+                        targetNodeId: targetNode.id,
+                        newNode: nodeToMove,
+                        position: action.position,
+                        focused: action.focused,
+                    };
+                    this.treeReducer(splitAction, false);
+                }
                 break;
             }
             case "cleanuporphaned": {

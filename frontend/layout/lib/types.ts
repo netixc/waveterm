@@ -88,6 +88,8 @@ export enum LayoutTreeActionType {
     ReplaceNode = "replace",
     SplitHorizontal = "splithorizontal",
     SplitVertical = "splitvertical",
+    MoveHorizontal = "movehorizontal",
+    MoveVertical = "movevertical",
 }
 
 /**

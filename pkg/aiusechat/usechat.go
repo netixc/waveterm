@@ -57,7 +57,12 @@ var SystemPromptText = strings.Join([]string{
 	`You can execute shell commands in terminal widgets using the term_run_command tool when a terminal is open.`,
 	`You can open new widgets (terminals, web browsers, file previews) using the widget_open tool.`,
 	`You can rename widgets using the widget_rename tool and close them using the widget_close tool.`,
+	`You can move existing widgets to new positions using the widget_move tool - this rearranges layout without closing widgets.`,
 	`When asked to run commands in a terminal, use term_run_command - do not just suggest commands.`,
+	`When opening widgets, you can control their layout position using split_direction, target_widget, and position parameters.`,
+	`When asked to rearrange or move widgets, use widget_move instead of closing and recreating them.`,
+	`Use direction='vertical' to stack widgets (top/bottom), direction='horizontal' for side-by-side (left/right).`,
+	`Position 'before' places the widget above/left of target, 'after' places it below/right (default).`,
 }, " ")
 
 var SystemPromptText_OpenAI = strings.Join([]string{
@@ -93,6 +98,9 @@ var SystemPromptText_OpenAI = strings.Join([]string{
 
 	`You can write and edit local files on disk using available tools.`,
 	`You can execute shell commands in terminal widgets using the term_run_command tool when a terminal is open.`,
+	`You can open new widgets using widget_open, rename with widget_rename, close with widget_close, and move with widget_move.`,
+	`When opening widgets, control layout with split_direction (horizontal/vertical), target_widget (widget ID to split against), and position (before/after).`,
+	`Use widget_move to rearrange existing widgets without closing them - specify direction and target_widget_id.`,
 	`You cannot read/write remote files.`,
 	`If asked to deal with remote files, say that these features aren't available yet AND make sure to say that they are coming soon (stay tuned for updates).`,
 
