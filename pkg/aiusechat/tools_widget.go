@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
+	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wcore"
 	"github.com/wavetermdev/waveterm/pkg/wps"
@@ -138,7 +139,9 @@ func GetWidgetOpenToolDefinition(tabId string) uctypes.ToolDefinition {
 					meta["file"] = parsed.File
 				}
 			case "term":
-				if parsed.Connection != "" {
+				meta["controller"] = "shell"
+				// Only set connection for remote connections, not "local" (which is the default)
+				if parsed.Connection != "" && parsed.Connection != "local" {
 					meta["connection"] = parsed.Connection
 				}
 			case "cpuplot":
@@ -165,6 +168,15 @@ func GetWidgetOpenToolDefinition(tabId string) uctypes.ToolDefinition {
 			err = wcore.QueueLayoutActionForTab(ctx, tabId, layoutAction)
 			if err != nil {
 				return nil, fmt.Errorf("failed to add widget to layout: %w", err)
+			}
+
+			// For terminal widgets, start the controller before returning
+			// This ensures the terminal is ready to receive commands
+			if parsed.WidgetType == "term" {
+				err = blockcontroller.ResyncController(ctx, tabId, blockData.OID, nil, false)
+				if err != nil {
+					return nil, fmt.Errorf("failed to start terminal controller: %w", err)
+				}
 			}
 
 			updates := waveobj.ContextGetUpdatesRtn(ctx)
