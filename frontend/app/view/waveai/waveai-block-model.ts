@@ -345,7 +345,7 @@ export class WaveAIBlockModel implements WaveAIBlockModelInterface {
         globalStore.set(this.thinkingMode, mode);
         RpcApi.SetRTInfoCommand(TabRpcClient, {
             oref: this.orefContext,
-            data: { "waveai:thinkingmode": mode },
+            data: { "waveai:thinkinglevel": mode },
         });
     }
 
@@ -363,7 +363,7 @@ export class WaveAIBlockModel implements WaveAIBlockModelInterface {
         }
         globalStore.set(this.chatId, chatIdValue);
 
-        const thinkingModeValue = rtInfo?.["waveai:thinkingmode"] ?? "balanced";
+        const thinkingModeValue = rtInfo?.["waveai:thinkinglevel"] ?? "balanced";
         globalStore.set(this.thinkingMode, thinkingModeValue);
 
         try {

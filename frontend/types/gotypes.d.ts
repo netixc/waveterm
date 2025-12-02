@@ -952,6 +952,7 @@ declare global {
         "waveai:chatid"?: string;
         "waveai:mode"?: string;
         "waveai:maxoutputtokens"?: number;
+        "waveai:thinkinglevel"?: string;
     };
 
     // iochantypes.Packet
